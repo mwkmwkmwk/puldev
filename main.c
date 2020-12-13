@@ -151,7 +151,9 @@ enum {
 	NS_READY,
 } net_state = NS_BOOTP;
 
-extern uint8_t rxdata[0x4000], txdata[0x2000], rxbuf[0x800];
+extern uint8_t rxdata[0x4000], txdata[0x2000], rxbuf[0x800], mixbuf[0x800];
+static uint16_t *const mixbuf16 = (void *)mixbuf;
+static uint32_t *const mixbuf32 = (void *)mixbuf;
 
 int rxbpos = 0;
 bool rxbact = 0;
@@ -375,7 +377,7 @@ bool tx_packet_ex(uint8_t *pkt, size_t len, uint32_t txtoff, uint32_t txtlen) {
 			dmb();
 			txring[txidx].addr = ptr_a;
 			dmb();
-			uint32_t attr = len;
+			uint32_t attr = txtlen;
 			attr |= 0x8000;
 			if (txidx == 0x7f)
 				attr |= 0x40000000;
@@ -558,7 +560,9 @@ bool send_tcp_ack(void) {
 }
 
 int send_tcp_dat(uint32_t offset) {
-	uint16_t dlen = txtused;
+	if (offset >= txtused)
+		return 0;
+	uint16_t dlen = txtused - offset;
 	if (dlen > 1460)
 		dlen = 1460;
 	if (offset >= txtwin)
@@ -730,6 +734,7 @@ void rx_ip(uint32_t len) {
 						printf("WTF more acked than sent\n");
 						return;
 					}
+					seq = cur_ack;
 					if (bump > txtsent)
 						txtsent = 0;
 					else
@@ -969,6 +974,205 @@ __attribute__((interrupt)) void handle_irq(void) {
 			while(1) wfi();
 	}
 	*GIC_ICCEOIR = iar;
+}
+
+int recv(void *buf, size_t len) {
+	uint8_t *dptr = buf;
+	cpsid();
+	dsb();
+	while (len) {
+		while (!rxtused) {
+			wfi();
+			cpsie();
+			dsb();
+			cpsid();
+			dsb();
+		}
+		uint32_t cur = rxtused;
+		if (cur > len)
+			cur = len;
+		if (cur > (rxtsize - rxtget))
+			cur = rxtsize - rxtget;
+		memcpy(dptr, rxtcp + rxtget, cur);
+		len -= cur;
+		dptr += cur;
+		rxtget += cur;
+		if (rxtget == rxtsize)
+			rxtget = 0;
+		rxtfree += cur;
+		rxtused -= cur;
+		// XXX: send rxtwin?
+	}
+	cpsie();
+	dsb();
+	return 0;
+}
+
+void do_tx() {
+	int offs = txtsent;
+	int cur = 0;
+	while (cur = send_tcp_dat(offs))
+		offs += cur;
+	txtsent = offs;
+}
+
+int send(void *buf, size_t len) {
+	uint8_t *sptr = buf;
+	cpsid();
+	dsb();
+	while (len) {
+		while (!txtfree) {
+			do_tx();
+			wfi();
+			cpsie();
+			dsb();
+			cpsid();
+			dsb();
+		}
+		uint32_t cur = txtfree;
+		if (cur > len)
+			cur = len;
+		if (cur > (txtsize - txtput))
+			cur = txtsize - txtput;
+		memcpy(txtcp + txtput, sptr, cur);
+		len -= cur;
+		sptr += cur;
+		txtput += cur;
+		if (txtput == txtsize)
+			txtput = 0;
+		txtused += cur;
+		txtfree -= cur;
+		// XXX send pakige
+	}
+	do_tx();
+	cpsie();
+	dsb();
+	return 0;
+}
+
+int cmd_rd8() {
+	uint32_t addr;
+	uint16_t len;
+	uint8_t reply = 0x80;
+	if (recv(&addr, sizeof addr)) return -1;
+	if (recv(&len, sizeof len)) return -1;
+	if (send(&reply, 1)) return -1;
+	if (send(&len, sizeof len)) return -1;
+	while (len) {
+		uint16_t cur = len;
+		if (cur > 0x800)
+			cur = 0x800;
+		for (int i = 0; i < cur; i++)
+			mixbuf[i] = *(volatile uint8_t *)(addr++);
+		if (send(mixbuf, cur)) return -1;
+		len -= cur;
+	}
+	return 0;
+}
+
+int cmd_rd16() {
+	uint32_t addr;
+	uint16_t len;
+	uint8_t reply = 0x81;
+	if (recv(&addr, sizeof addr)) return -1;
+	if (recv(&len, sizeof len)) return -1;
+	if (send(&reply, 1)) return -1;
+	if (send(&len, sizeof len)) return -1;
+	while (len) {
+		uint16_t cur = len;
+		if (cur > 0x400)
+			cur = 0x400;
+		for (int i = 0; i < cur; i++) {
+			mixbuf16[i] = *(volatile uint16_t *)addr;
+			addr += 2;
+		}
+		if (send(mixbuf, cur * 2)) return -1;
+		len -= cur;
+	}
+	return 0;
+}
+
+int cmd_rd32() {
+	uint32_t addr;
+	uint16_t len;
+	uint8_t reply = 0x82;
+	if (recv(&addr, sizeof addr)) return -1;
+	if (recv(&len, sizeof len)) return -1;
+	if (send(&reply, 1)) return -1;
+	if (send(&len, sizeof len)) return -1;
+	while (len) {
+		uint16_t cur = len;
+		if (cur > 0x200)
+			cur = 0x200;
+		for (int i = 0; i < cur; i++) {
+			mixbuf32[i] = *(volatile uint32_t *)addr;
+			addr += 4;
+		}
+		if (send(mixbuf, cur * 4)) return -1;
+		len -= cur;
+	}
+	return 0;
+}
+
+int cmd_wr8() {
+	uint32_t addr;
+	uint16_t len;
+	if (recv(&addr, sizeof addr)) return -1;
+	if (recv(&len, sizeof len)) return -1;
+	while (len) {
+		uint16_t cur = len;
+		if (cur > 0x800)
+			cur = 0x800;
+		if (recv(mixbuf, cur)) return -1;
+		for (int i = 0; i < cur; i++)
+			*(volatile uint8_t *)(addr++) = mixbuf[i];
+		len -= cur;
+	}
+	uint8_t reply = 0x90;
+	if (send(&reply, 1)) return -1;
+	return 0;
+}
+
+int cmd_wr16() {
+	uint32_t addr;
+	uint16_t len;
+	if (recv(&addr, sizeof addr)) return -1;
+	if (recv(&len, sizeof len)) return -1;
+	while (len) {
+		uint16_t cur = len;
+		if (cur > 0x400)
+			cur = 0x400;
+		if (recv(mixbuf, cur * 2)) return -1;
+		for (int i = 0; i < cur; i++) {
+			*(volatile uint16_t *)addr = mixbuf16[i];
+			addr += 2;
+		}
+		len -= cur;
+	}
+	uint8_t reply = 0x91;
+	if (send(&reply, 1)) return -1;
+	return 0;
+}
+
+int cmd_wr32() {
+	uint32_t addr;
+	uint16_t len;
+	if (recv(&addr, sizeof addr)) return -1;
+	if (recv(&len, sizeof len)) return -1;
+	while (len) {
+		uint16_t cur = len;
+		if (cur > 0x200)
+			cur = 0x200;
+		if (recv(mixbuf, cur * 4)) return -1;
+		for (int i = 0; i < cur; i++) {
+			*(volatile uint32_t *)addr = mixbuf32[i];
+			addr += 4;
+		}
+		len -= cur;
+	}
+	uint8_t reply = 0x92;
+	if (send(&reply, 1)) return -1;
+	return 0;
 }
 
 void main() {
@@ -1221,6 +1425,12 @@ void main() {
 	GEM0_LADDR1[0] = mac[0] | mac[1] << 8 | mac[2] << 16 | mac[3] << 24;
 	GEM0_LADDR1[1] = mac[4] | mac[5] << 8;
 
+#if 0
+	for (int i = 0; i < 0x20; i++) {
+		printf("PHY %x: %x\n", i, phyrd(i));
+	}
+#endif
+
 	printf("Hello, world!\n");
 	printf("I AM %x\n", *(volatile uint32_t *)0xf8000530);
 
@@ -1232,6 +1442,16 @@ void main() {
 	// Start GEM0.
 	*GEM0_NWCTRL = 0x3c;
 
+restart:
+	cpsid();
+	dsb();
+
+	net_state = NS_BOOTP;
+	rxtget = rxtput = rxtused = 0;
+	txtget = txtput = txtused = txtsent = 0;
+	seq = ack = 0;
+	txtfree = txtsize;
+	rxtfree = rxtsize;
 	send_bootp();
 	retry_reload = 1;
 	retry_timer = 2;
@@ -1239,11 +1459,36 @@ void main() {
 	// Start interrupt processing.
 	dsb();
 	cpsie();
-#if 0
-	for (int i = 0; i < 0x20; i++) {
-		printf("PHY %x: %x\n", i, phyrd(i));
+
+	while (1) {
+		uint8_t cmd;
+		if (recv(&cmd, 1))
+			goto restart;
+		switch (cmd) {
+			case 0x00:
+				if (cmd_rd8())
+					goto restart;
+				break;
+			case 0x01:
+				if (cmd_rd16())
+					goto restart;
+				break;
+			case 0x02:
+				if (cmd_rd32())
+					goto restart;
+				break;
+			case 0x10:
+				if (cmd_wr8())
+					goto restart;
+				break;
+			case 0x11:
+				if (cmd_wr16())
+					goto restart;
+				break;
+			case 0x12:
+				if (cmd_wr32())
+					goto restart;
+				break;
+		}
 	}
-#endif
-	
-	while(1) wfi();
 }

@@ -16,7 +16,7 @@ SECTIONS {
 	rxring = 0x10400;
 	txuart = 0x10800;
 	rxuart = 0x10c00;
-	devcbuf = 0x11000;
+	mixbuf = 0x11000;
 	rxbuf = 0x11800;
 	txdata = 0x12000;
 	rxdata = 0x14000;
