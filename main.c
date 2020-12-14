@@ -175,6 +175,7 @@ uint32_t txtget, txtput, txtfree = 0x4000, txtused, txtsent;
 uint32_t txtwin = 0;
 bool tcp_send_ack = false;
 bool tcp_send_dat = false;
+int tcp_sport = 666;
 
 void putc(char c) {
 	*SWDT_RESTART = 0x1999;
@@ -511,7 +512,7 @@ bool send_rst(void) {
 	uint8_t *ptr = buf + 20 + 14;
 
 	// TCP header
-	wr_be16(ptr+0, 666);
+	wr_be16(ptr+0, tcp_sport);
 	wr_be16(ptr+2, 666);
 	wr_be32(ptr+4, 0);
 	wr_be32(ptr+8, 0);
@@ -529,7 +530,7 @@ bool send_syn(void) {
 	uint8_t *ptr = buf + 20 + 14;
 
 	// TCP header
-	wr_be16(ptr+0, 666);
+	wr_be16(ptr+0, tcp_sport);
 	wr_be16(ptr+2, 666);
 	wr_be32(ptr+4, -1); // seq
 	wr_be32(ptr+8, 0); // ack
@@ -547,7 +548,7 @@ bool send_tcp_ack(void) {
 	uint8_t *ptr = buf + 20 + 14;
 
 	// TCP header
-	wr_be16(ptr+0, 666);
+	wr_be16(ptr+0, tcp_sport);
 	wr_be16(ptr+2, 666);
 	wr_be32(ptr+4, seq); // seq
 	wr_be32(ptr+8, ack); // ack
@@ -574,7 +575,7 @@ int send_tcp_dat(uint32_t offset) {
 	uint8_t *ptr = buf + 20 + 14;
 
 	// TCP header
-	wr_be16(ptr+0, 666);
+	wr_be16(ptr+0, tcp_sport);
 	wr_be16(ptr+2, 666);
 	wr_be32(ptr+4, seq + offset); // seq
 	wr_be32(ptr+8, ack); // ack
@@ -693,7 +694,7 @@ void rx_ip(uint32_t len) {
 				return;
 			if (rd_be16(next+0) != 666)
 				return;
-			if (rd_be16(next+2) != 666)
+			if (rd_be16(next+2) != tcp_sport)
 				return;
 			uint32_t cur_seq = rd_be32(next+4);
 			uint32_t cur_ack = rd_be32(next+8);
@@ -758,7 +759,7 @@ void rx_ip(uint32_t len) {
 				}
 				txtwin = cur_win;
 				if (cur_seq == ack && dlen && rxtfree) {
-					printf("RX TCP DATA %x %x\n", rxtput, dlen);
+					// printf("RX TCP DATA %x %x\n", rxtput, dlen);
 					if (dlen > rxtfree)
 						dlen = rxtfree;
 					if (rxtput + dlen > rxtsize) {
@@ -835,8 +836,10 @@ void rx_arp(uint32_t len) {
 			return;
 		printf("ARP reply (server!)\n");
 		if (net_state == NS_ARP) {
+			tcp_sport = 0x4000 + ((*PRIVT_CTR) & 0x7fff);
 			memcpy(srvmac, ptr+8, 6);
 			printf("MAC is %x:%x:%x:%x:%x:%x\n", srvmac[0], srvmac[1], srvmac[2], srvmac[3], srvmac[4], srvmac[5]);
+			printf("TCP port is %d\n", tcp_sport);
 			net_state = NS_RST;
 			retry_reload = 1;
 			retry_timer = 100;
@@ -1175,6 +1178,82 @@ int cmd_wr32() {
 	return 0;
 }
 
+int cmd_rddevc() {
+	uint16_t len;
+	uint8_t reply = 0x83;
+	if (recv(&len, sizeof len)) return -1;
+	if (send(&reply, 1)) return -1;
+	if (send(&len, sizeof len)) return -1;
+	while (len) {
+		uint16_t cur = len;
+		if (cur > 0x200)
+			cur = 0x200;
+		*DEVC_DMA_SRC_ADDR = 0xffffffff;
+		*DEVC_DMA_DST_ADDR = (uint32_t)mixbuf;
+		*DEVC_DMA_SRC_LEN = cur ;
+		*DEVC_DMA_DST_LEN = cur;
+		while (!(*DEVC_STATUS & 0x30000000));
+		printf("DEVC %x ", *DEVC_STATUS);
+		*DEVC_STATUS = 0x30000000;
+		printf("%x\n", *DEVC_STATUS);
+		if (send(mixbuf, cur * 4)) return -1;
+		len -= cur;
+	}
+	return 0;
+}
+
+int cmd_wrdevc() {
+	uint16_t len;
+	if (recv(&len, sizeof len)) return -1;
+	while (len) {
+		uint16_t cur = len;
+		if (cur > 0x200)
+			cur = 0x200;
+		if (recv(mixbuf, cur * 4)) return -1;
+		*DEVC_DMA_SRC_ADDR = (uint32_t)mixbuf;
+		*DEVC_DMA_DST_ADDR = 0xffffffff;
+		*DEVC_DMA_SRC_LEN = cur;
+		*DEVC_DMA_DST_LEN = cur ;
+		while (!(*DEVC_STATUS & 0x30000000));
+		//printf("DEVC %x ", *DEVC_STATUS);
+		*DEVC_STATUS = 0x30000000;
+		//printf("%x\n", *DEVC_STATUS);
+		len -= cur;
+	}
+	uint8_t reply = 0x93;
+	if (send(&reply, 1)) return -1;
+	return 0;
+}
+
+int cmd_fpga_reset() {
+	*FPGA_RST_CTRL = 0xf;
+	*LVL_SHFTR_EN = 0xa;
+	*DEVC_MCTRL = 0;
+	uint32_t ctrl = *DEVC_CTRL;
+	ctrl |= 0x0c000000;
+	ctrl &= ~0x02000000;
+	*DEVC_CTRL = ctrl | 0x40000000;
+	*DEVC_CTRL = ctrl & ~0x40000000;
+	while (*DEVC_STATUS & 0x10);
+	*DEVC_CTRL = ctrl | 0x40000000;
+	while (!(*DEVC_STATUS & 0x10));
+	uint8_t reply = 0xa0;
+	if (send(&reply, 1)) return -1;
+	return 0;
+}
+
+int cmd_fpga_boot() {
+	uint8_t reply = 0xa1;
+	if (*DEVC_STATUS & 0x400) {
+		*LVL_SHFTR_EN = 0xf;
+		*FPGA_RST_CTRL = 0x0;
+	} else {
+		reply = 0xe1;
+	}
+	if (send(&reply, 1)) return -1;
+	return 0;
+}
+
 void main() {
 	// unlock SLCR
 	*SLCR_UNLOCK = SLCR_UNLOCK_VAL;
@@ -1477,6 +1556,10 @@ restart:
 				if (cmd_rd32())
 					goto restart;
 				break;
+			case 0x03:
+				if (cmd_rddevc())
+					goto restart;
+				break;
 			case 0x10:
 				if (cmd_wr8())
 					goto restart;
@@ -1487,6 +1570,18 @@ restart:
 				break;
 			case 0x12:
 				if (cmd_wr32())
+					goto restart;
+				break;
+			case 0x13:
+				if (cmd_wrdevc())
+					goto restart;
+				break;
+			case 0x20:
+				if (cmd_fpga_reset())
+					goto restart;
+				break;
+			case 0x21:
+				if (cmd_fpga_boot())
 					goto restart;
 				break;
 		}
