@@ -143,6 +143,24 @@ static volatile uint32_t *const UART0_FLOWDEL = (void *)0xe0000038;
 static volatile uint32_t *const UART0_TXWM = (void *)0xe0000044;
 
 
+static volatile uint32_t *const UART1_CR = (void *)0xe0001000;
+static volatile uint32_t *const UART1_MR = (void *)0xe0001004;
+static volatile uint32_t *const UART1_IER = (void *)0xe0001008;
+static volatile uint32_t *const UART1_IDR = (void *)0xe000100c;
+static volatile uint32_t *const UART1_IMR = (void *)0xe0001010;
+static volatile uint32_t *const UART1_ISR = (void *)0xe0001014;
+static volatile uint32_t *const UART1_BAUDGEN = (void *)0xe0001018;
+static volatile uint32_t *const UART1_RXTOUT = (void *)0xe000101c;
+static volatile uint32_t *const UART1_RXWM = (void *)0xe0001020;
+static volatile uint32_t *const UART1_MODEMCR = (void *)0xe0001024;
+static volatile uint32_t *const UART1_MODEMSR = (void *)0xe0001028;
+static volatile uint32_t *const UART1_SR = (void *)0xe000102c;
+static volatile uint32_t *const UART1_FIFO = (void *)0xe0001030;
+static volatile uint32_t *const UART1_BAUDDIV = (void *)0xe0001034;
+static volatile uint32_t *const UART1_FLOWDEL = (void *)0xe0001038;
+static volatile uint32_t *const UART1_TXWM = (void *)0xe0001044;
+
+
 static volatile uint32_t *const GEM0_NWCTRL = (void *)0xe000b000;
 static volatile uint32_t *const GEM0_NWCFG = (void *)0xe000b004;
 static volatile uint32_t *const GEM0_NWSR = (void *)0xe000b008;

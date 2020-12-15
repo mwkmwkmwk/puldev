@@ -177,6 +177,16 @@ bool tcp_send_ack = false;
 bool tcp_send_dat = false;
 int tcp_sport = 666;
 
+// uart1
+
+bool uart_on = false;
+extern uint8_t txuart[0x400];
+static const int utxsize = 0x400;
+uint32_t utxget, utxput, utxused, utxfree;
+extern uint16_t rxuart[0x200];
+static const int urxsize = 0x200;
+uint32_t urxget, urxput, urxused, urxfree;
+
 void putc(char c) {
 	*SWDT_RESTART = 0x1999;
 	while (*UART0_SR & 0x10);
@@ -868,6 +878,62 @@ void rx_process(uint32_t len) {
 	}
 }
 
+void do_uart_tx() {
+	while (!(*UART1_SR & 0x10) && utxused) {
+		*UART1_FIFO = txuart[utxget];
+		utxused--;
+		utxfree++;
+		utxget++;
+		if (utxget == utxsize)
+			utxget = 0;
+		*UART1_ISR = 0x408;
+	}
+	if (utxused)
+		*UART1_IER = 0x408;
+	else
+		*UART1_IDR = 0x408;
+}
+
+void urxwr(uint16_t val) {
+	if (urxfree) {
+		rxuart[urxput++] = val;
+		if (urxput == urxsize)
+			urxput = 0;
+		urxfree--;
+		urxused++;
+	} else {
+		int prev = urxput - 1;
+		if (urxput == 0)
+			prev = urxsize - 1;
+		rxuart[prev] = 0x100; // OVR
+	}
+}
+
+void handle_uart(void) {
+	uint32_t isr = *UART1_ISR;
+	if (isr & 0x408)
+		do_uart_tx();
+	if (isr & 0x20) {
+		*UART1_ISR = 0x20;
+		urxwr(0x100); // OVR
+	}
+	if (isr & 0x40) {
+		*UART1_ISR = 0x40;
+		urxwr(0x200); // FRAMING
+	}
+	if (isr & 0x80) {
+		*UART1_ISR = 0x80;
+		urxwr(0x400); // PARITY
+	}
+	if (isr & 1) {
+		*UART1_ISR = 1;
+		int ctr = 64;
+		while (!(*UART1_SR & 2) && ctr--) {
+			urxwr(*UART1_FIFO);
+		}
+	}
+}
+
 void handle_gem(void) {
 	if (*GEM0_ISR & 2) {
 		*GEM0_ISR = 2;
@@ -969,6 +1035,9 @@ __attribute__((interrupt)) void handle_irq(void) {
 		case 54:
 			handle_gem();
 			break;
+		case 82:
+			handle_uart();
+			break;
 		case 0x3ff:
 			printf("Spurious IRQ\n");
 			return;
@@ -1045,12 +1114,44 @@ int send(void *buf, size_t len) {
 			txtput = 0;
 		txtused += cur;
 		txtfree -= cur;
-		// XXX send pakige
 	}
 	do_tx();
 	cpsie();
 	dsb();
 	return 0;
+}
+
+void uart_tx(uint8_t *buf, size_t len) {
+	if (!uart_on)
+		return;
+	uint8_t *sptr = buf;
+	cpsid();
+	dsb();
+	while (len) {
+		while (!utxfree) {
+			wfi();
+			cpsie();
+			dsb();
+			cpsid();
+			dsb();
+		}
+		uint32_t cur = utxfree;
+		if (cur > len)
+			cur = len;
+		if (cur > (utxsize - utxput))
+			cur = utxsize - utxput;
+		memcpy(txuart + utxput, sptr, cur);
+		len -= cur;
+		sptr += cur;
+		utxput += cur;
+		if (utxput == utxsize)
+			utxput = 0;
+		utxused += cur;
+		utxfree -= cur;
+		do_uart_tx();
+	}
+	cpsie();
+	dsb();
 }
 
 int cmd_rd8() {
@@ -1226,6 +1327,8 @@ int cmd_wrdevc() {
 }
 
 int cmd_fpga_reset() {
+	cpsid();
+	dsb();
 	*FPGA_RST_CTRL = 0xf;
 	*LVL_SHFTR_EN = 0xa;
 	*DEVC_MCTRL = 0;
@@ -1237,6 +1340,15 @@ int cmd_fpga_reset() {
 	while (*DEVC_STATUS & 0x10);
 	*DEVC_CTRL = ctrl | 0x40000000;
 	while (!(*DEVC_STATUS & 0x10));
+
+	// UART
+	*UART_RST_CTRL = 0xa;
+	uart_on = false;
+
+	dsb();
+	cpsie();
+	dsb();
+
 	uint8_t reply = 0xa0;
 	if (send(&reply, 1)) return -1;
 	return 0;
@@ -1245,11 +1357,54 @@ int cmd_fpga_reset() {
 int cmd_fpga_boot() {
 	uint8_t reply = 0xa1;
 	if (*DEVC_STATUS & 0x400) {
+		cpsid();
+		dsb();
+
 		*LVL_SHFTR_EN = 0xf;
+
+		// UART
+		*UART_RST_CTRL = 0x0;
+		*UART1_CR = 0x12b; // reset & disable TX & RX, stop break
+		*UART1_MR = 0x00000020; // 8 bits, no parity
+		*UART1_IDR = 0xffffffff;
+		*UART1_IER = 0x000000e1;
+		*UART1_ISR = 0xffffffff;
+		*UART1_BAUDGEN = 10;
+		*UART1_BAUDDIV = 9;
+		*UART1_RXWM = 1;
+		*UART1_TXWM = 0x20;
+		*UART1_MODEMCR = 0x3;
+		*UART1_CR = 0x114; // start it
+		utxput = utxget = utxused = 0;
+		utxfree = utxsize;
+		urxput = urxget = urxused = 0;
+		urxfree = urxsize;
+		uart_on = true;
+
 		*FPGA_RST_CTRL = 0x0;
+
+		dsb();
+		cpsie();
+		dsb();
 	} else {
 		reply = 0xe1;
 	}
+	if (send(&reply, 1)) return -1;
+	return 0;
+}
+
+int cmd_uart_tx() {
+	uint16_t len;
+	if (recv(&len, sizeof len)) return -1;
+	while (len) {
+		uint16_t cur = len;
+		if (cur > 0x200)
+			cur = 0x200;
+		if (recv(mixbuf, cur)) return -1;
+		uart_tx(mixbuf, cur);
+		len -= cur;
+	}
+	uint8_t reply = 0xb0;
 	if (send(&reply, 1)) return -1;
 	return 0;
 }
@@ -1444,9 +1599,10 @@ void main() {
 	GIC_ICDICFR[3] = 0x5555d555;
 	GIC_ICDICFR[4] = 0x75555555;
 	GIC_ICDICFR[5] = 0x57555555;
-	// en 29, 54
+	// en 29, 54, 82
 	GIC_ICDISER[0] = 0x20000000;
 	GIC_ICDISER[1] = 0x00400000;
+	GIC_ICDISER[2] = 0x00040000;
 	// en everything
 	*GIC_ICDDCR = 0x3;
 
@@ -1535,55 +1691,98 @@ restart:
 	retry_reload = 1;
 	retry_timer = 2;
 
-	// Start interrupt processing.
-	dsb();
-	cpsie();
-
+	// Main loop.
 	while (1) {
-		uint8_t cmd;
-		if (recv(&cmd, 1))
-			goto restart;
-		switch (cmd) {
-			case 0x00:
-				if (cmd_rd8())
-					goto restart;
-				break;
-			case 0x01:
-				if (cmd_rd16())
-					goto restart;
-				break;
-			case 0x02:
-				if (cmd_rd32())
-					goto restart;
-				break;
-			case 0x03:
-				if (cmd_rddevc())
-					goto restart;
-				break;
-			case 0x10:
-				if (cmd_wr8())
-					goto restart;
-				break;
-			case 0x11:
-				if (cmd_wr16())
-					goto restart;
-				break;
-			case 0x12:
-				if (cmd_wr32())
-					goto restart;
-				break;
-			case 0x13:
-				if (cmd_wrdevc())
-					goto restart;
-				break;
-			case 0x20:
-				if (cmd_fpga_reset())
-					goto restart;
-				break;
-			case 0x21:
-				if (cmd_fpga_boot())
-					goto restart;
-				break;
+		while (!rxtused && !urxused) {
+			wfi();
+			cpsie();
+			dsb();
+			cpsid();
+			dsb();
+		}
+		bool do_uart = urxused != 0;
+		if (do_uart) {
+			int num = urxused;
+			if (num + urxget > urxsize)
+				num = urxsize - urxget;
+			memcpy(mixbuf16, rxuart + urxget, num * 2);
+			dsb();
+			cpsie();
+			dsb();
+
+			uint8_t code = 0xb1;
+			uint16_t len = num;
+			if (send(&code, 1)) goto restart;
+			if (send(&len, 2)) goto restart;
+			if (send(mixbuf16, num * 2)) goto restart;
+
+			dsb();
+			cpsid();
+			dsb();
+			urxused -= num;
+			urxfree += num;
+			urxget += num;
+			if (urxget == urxsize)
+				urxget = 0;
+		} else {
+			dsb();
+			cpsie();
+			dsb();
+			uint8_t cmd;
+			if (recv(&cmd, 1))
+				goto restart;
+			switch (cmd) {
+				case 0x00:
+					if (cmd_rd8())
+						goto restart;
+					break;
+				case 0x01:
+					if (cmd_rd16())
+						goto restart;
+					break;
+				case 0x02:
+					if (cmd_rd32())
+						goto restart;
+					break;
+				case 0x03:
+					if (cmd_rddevc())
+						goto restart;
+					break;
+				case 0x10:
+					if (cmd_wr8())
+						goto restart;
+					break;
+				case 0x11:
+					if (cmd_wr16())
+						goto restart;
+					break;
+				case 0x12:
+					if (cmd_wr32())
+						goto restart;
+					break;
+				case 0x13:
+					if (cmd_wrdevc())
+						goto restart;
+					break;
+				case 0x20:
+					if (cmd_fpga_reset())
+						goto restart;
+					break;
+				case 0x21:
+					if (cmd_fpga_boot())
+						goto restart;
+					break;
+				case 0x30:
+					if (cmd_uart_tx())
+						goto restart;
+					break;
+				case 0x40:
+					*PSS_RST_CTRL = 1;
+					break;
+			}
+			dsb();
+			cpsid();
+			dsb();
 		}
 	}
 }
