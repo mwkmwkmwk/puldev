@@ -187,6 +187,10 @@ extern uint16_t rxuart[0x200];
 static const int urxsize = 0x200;
 uint32_t urxget, urxput, urxused, urxfree;
 
+// wdt
+
+int wdt = 30000;
+
 void putc(char c) {
 	*SWDT_RESTART = 0x1999;
 	while (*UART0_SR & 0x10);
@@ -985,6 +989,11 @@ void handle_gem(void) {
 
 void handle_privt(void) {
 	*SWDT_RESTART = 0x1999;
+	wdt--;
+	if (!wdt) {
+		// oh no.
+		*PSS_RST_CTRL = 1;
+	}
 	if (retry_reload) {
 		retry_timer--;
 		if (!retry_timer) {
@@ -1778,6 +1787,9 @@ restart:
 					break;
 				case 0x40:
 					*PSS_RST_CTRL = 1;
+					break;
+				case 0x41:
+					wdt = 1500;
 					break;
 			}
 			dsb();
