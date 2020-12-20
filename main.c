@@ -171,6 +171,7 @@ static const int rxtsize = 0x4000;
 static const int txtsize = 0x4000;
 uint32_t seq = 0, ack = 0;
 uint32_t rxtget, rxtput, rxtfree = 0x4000, rxtused;
+uint32_t rxwinsent = 0;
 uint32_t txtget, txtput, txtfree = 0x4000, txtused, txtsent;
 uint32_t txtwin = 0;
 bool tcp_send_ack = false;
@@ -552,6 +553,7 @@ bool send_syn(void) {
 	wr_be16(ptr+14, rxtsize); // window
 	wr_be16(ptr+16, 0); // checksum
 	wr_be16(ptr+18, 0); // urgent
+	rxwinsent = rxtsize;
 
 	return tx_packet(buf, sizeof buf);
 }
@@ -570,6 +572,7 @@ bool send_tcp_ack(void) {
 	wr_be16(ptr+14, rxtfree); // window
 	wr_be16(ptr+16, 0); // checksum
 	wr_be16(ptr+18, 0); // urgent
+	rxwinsent = rxtfree;
 
 	return tx_packet(buf, sizeof buf);
 }
@@ -746,29 +749,29 @@ void rx_ip(uint32_t len) {
 				if (cur_ack != seq) {
 					uint32_t bump = cur_ack - seq;
 					if (bump > txtused) {
-						printf("WTF more acked than sent\n");
-						return;
-					}
-					seq = cur_ack;
-					if (bump > txtsent)
-						txtsent = 0;
-					else
-						txtsent -= bump;
-					txtused -= bump;
-					txtfree += bump;
-					txtget += bump;
-					txtget %= txtsize;
-					if (txtused && !txtsent && txtwin) {
-						tcp_send_dat = true;
-					}
-					if (!txtused) {
-						retry_reload = 0;
-					} else if (!txtwin) {
-						retry_reload = 256;
-						retry_timer = 256;
+						tcp_send_ack = true;
 					} else {
-						retry_reload = 1;
-						retry_timer = 2;
+						seq = cur_ack;
+						if (bump > txtsent)
+							txtsent = 0;
+						else
+							txtsent -= bump;
+						txtused -= bump;
+						txtfree += bump;
+						txtget += bump;
+						txtget %= txtsize;
+						if (txtused && !txtsent && txtwin) {
+							tcp_send_dat = true;
+						}
+						if (!txtused) {
+							retry_reload = 0;
+						} else if (!txtwin) {
+							retry_reload = 256;
+							retry_timer = 256;
+						} else {
+							retry_reload = 1;
+							retry_timer = 2;
+						}
 					}
 				}
 				txtwin = cur_win;
@@ -850,7 +853,7 @@ void rx_arp(uint32_t len) {
 			return;
 		printf("ARP reply (server!)\n");
 		if (net_state == NS_ARP) {
-			tcp_sport = 0x4000 + ((*PRIVT_CTR) & 0x7fff);
+			tcp_sport = 0x4000 + ((*PRIVT_CTR ^ *REBOOT_STATUS ^ *REBOOT_STATUS >> 24) & 0x7fff);
 			memcpy(srvmac, ptr+8, 6);
 			printf("MAC is %x:%x:%x:%x:%x:%x\n", srvmac[0], srvmac[1], srvmac[2], srvmac[3], srvmac[4], srvmac[5]);
 			printf("TCP port is %d\n", tcp_sport);
@@ -1082,7 +1085,8 @@ int recv(void *buf, size_t len) {
 			rxtget = 0;
 		rxtfree += cur;
 		rxtused -= cur;
-		// XXX: send rxtwin?
+		if (rxtfree - rxwinsent > 0x1000)
+			send_tcp_ack();
 	}
 	cpsie();
 	dsb();
@@ -1584,6 +1588,8 @@ void main() {
 	*GPIOB_CFG_CMOS18 = 0x0c301166;
 	*GPIOB_CFG_CMOS33 = 0x0c301166;
 	*GPIOB_CFG_HSTL = 0x0c750077;
+
+	*REBOOT_STATUS += 0x1000000;
 
 	// Private timer setup.
 	*PRIVT_LOAD = 3250000;

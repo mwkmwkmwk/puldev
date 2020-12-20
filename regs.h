@@ -60,6 +60,7 @@ static volatile uint32_t *const QSPI_RST_CTRL = (void *)0xf8000230;
 static volatile uint32_t *const SMC_RST_CTRL = (void *)0xf8000234;
 static volatile uint32_t *const FPGA_RST_CTRL = (void *)0xf8000240;
 static volatile uint32_t *const A9_CPU_RST_CTRL = (void *)0xf8000244;
+static volatile uint32_t *const REBOOT_STATUS = (void *)0xf8000258;
 
 static volatile uint32_t *const WDT_CLK_SEL = (void *)0xf8000304;
 
@@ -172,6 +173,7 @@ static volatile uint32_t *const GEM0_IER = (void *)0xe000b028;
 static volatile uint32_t *const GEM0_IDR = (void *)0xe000b02c;
 static volatile uint32_t *const GEM0_PHY = (void *)0xe000b034;
 static volatile uint32_t *const GEM0_LADDR1 = (void *)0xe000b088;
+static volatile uint32_t *const GEM0_TIMER_NS = (void *)0xe000b1d4;
 
 
 static volatile uint32_t *const QSPI_CR = (void *)0xe000d000;
