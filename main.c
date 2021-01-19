@@ -1436,22 +1436,26 @@ void main() {
 	*ARM_PLL_CTRL = 0x0001a010;
 	*ARM_PLL_CTRL = 0x0001a011;
 	*ARM_PLL_CTRL = 0x0001a010;
-	// DDR PLL off.
-	*DDR_PLL_CTRL = 0x13;
+	// DDR PLL = 50MHz * 21 = 1050MHz
+	*DDR_PLL_CFG = 12 << 4 | 2 << 8 | 475 << 12;
+	*DDR_PLL_CTRL = 0x00015010;
+	*DDR_PLL_CTRL = 0x00015011;
+	*DDR_PLL_CTRL = 0x00015010;
 	// IO PLL = 50MHz * 20 = 1000MHz
 	*IO_PLL_CFG = 12 << 4 | 2 << 8 | 500 << 12;
 	*IO_PLL_CTRL = 0x00014010;
 	*IO_PLL_CTRL = 0x00014011;
 	*IO_PLL_CTRL = 0x00014010;
 	// wait for lock
-	while ((*PLL_STATUS & 5) != 5);
+	while ((*PLL_STATUS & 7) != 7);
 	// disable bypass
 	*ARM_PLL_CTRL = 0x0001a000;
+	*DDR_PLL_CTRL = 0x00015000;
 	*IO_PLL_CTRL = 0x00014000;
 
 	// clocks
 	*ARM_CLK_CTRL = 0x1f000200; // 1300MHz / 2 == 650MHz
-	*DDR_CLK_CTRL = 0x08200000;
+	*DDR_CLK_CTRL = 0x0c200003;
 	*DCI_CLK_CTRL = 0x00102000;
 	*APER_CLK_CTRL = 0x00f00040; // GEM0, UART[01], GPIO, QSPI
 	USB_CLK_CTRL[0] = 0x00102000;
@@ -1499,6 +1503,7 @@ void main() {
 	*UART_RST_CTRL = 0x0; // up
 	*GPIO_RST_CTRL = 0x0; // up
 	*QSPI_RST_CTRL = 0x0; // up
+	*DDR_RST_CTRL = 0; // up
 
 	// SWDT on CPU clock
 	*WDT_CLK_SEL = 0;
